@@ -105,3 +105,136 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_volume_error_display_io() {
+        let err = VolumeError::Io(io::Error::new(io::ErrorKind::NotFound, "file not found"));
+        let msg = format!("{}", err);
+        assert!(msg.contains("I/O error"));
+        assert!(msg.contains("file not found"));
+    }
+
+    #[test]
+    fn test_volume_error_display_invalid_password() {
+        let err = VolumeError::InvalidPassword;
+        let msg = format!("{}", err);
+        assert!(msg.contains("Wrong password"));
+    }
+
+    #[test]
+    fn test_volume_error_display_unsupported() {
+        let err = VolumeError::UnsupportedFormat("test format".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("Unsupported format"));
+        assert!(msg.contains("test format"));
+    }
+
+    #[test]
+    fn test_volume_error_from_io() {
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let vol_err: VolumeError = io_err.into();
+        match vol_err {
+            VolumeError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::PermissionDenied),
+            _ => panic!("Expected VolumeError::Io"),
+        }
+    }
+
+    #[test]
+    fn test_volume_error_is_std_error() {
+        // Ensure VolumeError implements std::error::Error
+        let err: Box<dyn std::error::Error> = Box::new(VolumeError::InvalidPassword);
+        assert!(err.to_string().contains("Wrong password"));
+    }
+
+    #[test]
+    fn test_open_nonexistent_file() {
+        let result = TrueCryptVolume::open(
+            Path::new("/tmp/nonexistent_volume_file_12345.tc"),
+            "password",
+            false,
+        );
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match &err {
+            VolumeError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
+            _ => panic!("Expected Io error, got: {}", err),
+        }
+    }
+
+    #[test]
+    fn test_open_invalid_volume() {
+        // Create a temp file with random data (not a valid TC volume)
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_invalid_volume.tc");
+        let data = vec![0xAA_u8; 1024 * 1024]; // 1MB of garbage data
+        std::fs::write(&path, &data).unwrap();
+
+        let result = TrueCryptVolume::open(&path, "password", false);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match &err {
+            VolumeError::InvalidPassword => {} // Expected
+            _ => panic!("Expected InvalidPassword, got: {}", err),
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_open_empty_file() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_empty_volume.tc");
+        std::fs::write(&path, &[]).unwrap();
+
+        let result = TrueCryptVolume::open(&path, "password", false);
+        // Empty file should fail (can't read header)
+        assert!(result.is_err());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_open_too_small_file() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_small_volume.tc");
+        std::fs::write(&path, &[0u8; 100]).unwrap();
+
+        let result = TrueCryptVolume::open(&path, "password", false);
+        assert!(result.is_err());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_read_full_helper() {
+        let data = vec![1, 2, 3, 4, 5];
+        let mut cursor = Cursor::new(data.clone());
+        let mut buf = vec![0u8; 5];
+        read_full(&mut cursor, &mut buf).unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[test]
+    fn test_read_full_short_input() {
+        let data = vec![1, 2, 3];
+        let mut cursor = Cursor::new(data);
+        let mut buf = vec![0u8; 10];
+        let result = read_full(&mut cursor, &mut buf);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_read_full_exact() {
+        let data = vec![0xAA; 512];
+        let mut cursor = Cursor::new(data.clone());
+        let mut buf = vec![0u8; 512];
+        read_full(&mut cursor, &mut buf).unwrap();
+        assert_eq!(buf, data);
+    }
+}
