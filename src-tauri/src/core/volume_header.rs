@@ -180,3 +180,138 @@ fn read_be_u64(data: &[u8], offset: usize) -> u64 {
         data[offset + 7],
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_be_u16() {
+        let data = [0x01, 0x02, 0x03, 0x04];
+        assert_eq!(read_be_u16(&data, 0), 0x0102);
+        assert_eq!(read_be_u16(&data, 2), 0x0304);
+    }
+
+    #[test]
+    fn test_read_be_u32() {
+        let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        assert_eq!(read_be_u32(&data, 0), 0x01020304);
+        assert_eq!(read_be_u32(&data, 4), 0x05060708);
+    }
+
+    #[test]
+    fn test_read_be_u64() {
+        let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        assert_eq!(read_be_u64(&data, 0), 0x0102030405060708);
+    }
+
+    #[test]
+    fn test_read_be_boundary_values() {
+        // Zero
+        assert_eq!(read_be_u16(&[0, 0], 0), 0);
+        assert_eq!(read_be_u32(&[0, 0, 0, 0], 0), 0);
+        assert_eq!(read_be_u64(&[0, 0, 0, 0, 0, 0, 0, 0], 0), 0);
+
+        // Max values
+        assert_eq!(read_be_u16(&[0xFF, 0xFF], 0), u16::MAX);
+        assert_eq!(read_be_u32(&[0xFF, 0xFF, 0xFF, 0xFF], 0), u32::MAX);
+        assert_eq!(read_be_u64(&[0xFF; 8], 0), u64::MAX);
+    }
+
+    #[test]
+    fn test_try_decrypt_header_too_short() {
+        let short_header = [0u8; 100]; // Less than VOLUME_HEADER_EFFECTIVE_SIZE
+        let result = VolumeHeader::try_decrypt(&short_header, b"password");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_decrypt_wrong_password() {
+        // Random data that won't decrypt to valid header with any password
+        let random_header = [0xAA_u8; VOLUME_HEADER_EFFECTIVE_SIZE];
+        let result = VolumeHeader::try_decrypt(&random_header, b"wrong_password");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_decrypt_all_zeros() {
+        let header = [0u8; VOLUME_HEADER_EFFECTIVE_SIZE];
+        let result = VolumeHeader::try_decrypt(&header, b"password");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_is_hidden_volume() {
+        // A header with hidden_volume_size == 0 is not hidden
+        let header = make_test_header(0);
+        assert!(!header.is_hidden_volume());
+
+        // A header with hidden_volume_size > 0 is hidden
+        let header = make_test_header(1024 * 1024);
+        assert!(header.is_hidden_volume());
+    }
+
+    #[test]
+    fn test_to_info() {
+        let header = make_test_header(0);
+        let info = header.to_info();
+
+        assert_eq!(info.encryption, "AES");
+        assert_eq!(info.hash, "HMAC-SHA-512");
+        assert_eq!(info.header_version, 5);
+        assert_eq!(info.volume_size, 10 * 1024 * 1024);
+        assert_eq!(info.sector_size, 512);
+        assert!(!info.is_hidden);
+    }
+
+    #[test]
+    fn test_to_info_hidden_volume() {
+        let header = make_test_header(5 * 1024 * 1024);
+        let info = header.to_info();
+        assert!(info.is_hidden);
+    }
+
+    #[test]
+    fn test_volume_info_serializable() {
+        let header = make_test_header(0);
+        let info = header.to_info();
+        // VolumeInfo should be serializable to JSON
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"encryption\":\"AES\""));
+        assert!(json.contains("\"is_hidden\":false"));
+    }
+
+    #[test]
+    fn test_try_decrypt_exactly_effective_size() {
+        // Header exactly VOLUME_HEADER_EFFECTIVE_SIZE bytes should not panic
+        let header = [0xBB_u8; VOLUME_HEADER_EFFECTIVE_SIZE];
+        let result = VolumeHeader::try_decrypt(&header, b"test");
+        assert!(result.is_none()); // Won't match any valid key combo
+    }
+
+    #[test]
+    fn test_try_decrypt_larger_than_effective_size() {
+        // Header larger than effective size should still work (only first 512 used)
+        let header = [0xCC_u8; 1024];
+        let result = VolumeHeader::try_decrypt(&header, b"test");
+        assert!(result.is_none());
+    }
+
+    /// Helper to create a VolumeHeader with known values for testing
+    fn make_test_header(hidden_size: u64) -> VolumeHeader {
+        VolumeHeader {
+            header_version: 5,
+            required_program_version: 0x0700,
+            hidden_volume_size: hidden_size,
+            volume_size: 10 * 1024 * 1024,
+            encrypted_area_start: VOLUME_DATA_OFFSET,
+            encrypted_area_length: 10 * 1024 * 1024,
+            flags: 0,
+            sector_size: 512,
+            master_key_data: [0u8; MASTER_KEY_DATA_SIZE],
+            salt: [0u8; SALT_SIZE],
+            encryption_algorithm: &EncryptionAlgorithm::ALL[0], // AES
+            prf: Prf::Sha512,
+        }
+    }
+}

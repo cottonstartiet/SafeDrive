@@ -248,6 +248,7 @@ fn write_be64(buf: &mut [u8], offset: usize, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_mbr_boot_signature() {
@@ -319,5 +320,200 @@ mod tests {
             sum = sum.wrapping_add(b as u32);
         }
         assert_eq!(stored_checksum, !sum);
+    }
+
+    #[test]
+    fn test_partition_offset() {
+        assert_eq!(partition_offset(), 1024 * 1024); // 1MB
+    }
+
+    #[test]
+    fn test_mbr_partition_not_bootable() {
+        let mbr = create_mbr(1024 * 1024, 10 * 1024 * 1024, 11 * 1024 * 1024);
+        assert_eq!(mbr[446], 0x00); // Not active/bootable
+    }
+
+    #[test]
+    fn test_mbr_chs_lba_mode() {
+        let mbr = create_mbr(1024 * 1024, 10 * 1024 * 1024, 11 * 1024 * 1024);
+        // CHS of first sector should be LBA mode: 0xFE, 0xFF, 0xFF
+        assert_eq!(mbr[447], 0xFE);
+        assert_eq!(mbr[448], 0xFF);
+        assert_eq!(mbr[449], 0xFF);
+    }
+
+    #[test]
+    fn test_mbr_sector_count() {
+        let partition_size = 10 * 1024 * 1024u64;
+        let mbr = create_mbr(1024 * 1024, partition_size, 11 * 1024 * 1024);
+        let sector_count = u32::from_le_bytes([mbr[458], mbr[459], mbr[460], mbr[461]]);
+        assert_eq!(sector_count, (partition_size / 512) as u32);
+    }
+
+    #[test]
+    fn test_vhd_footer_features() {
+        let footer = create_vhd_footer(100 * 1024 * 1024);
+        // Features: 0x00000002 (Reserved, must be set)
+        assert_eq!(footer[11], 0x02);
+    }
+
+    #[test]
+    fn test_vhd_footer_format_version() {
+        let footer = create_vhd_footer(100 * 1024 * 1024);
+        // File Format Version: 0x00010000 (1.0)
+        assert_eq!(footer[13], 0x01);
+    }
+
+    #[test]
+    fn test_vhd_footer_data_offset_fixed() {
+        let footer = create_vhd_footer(100 * 1024 * 1024);
+        // Data Offset: 0xFFFFFFFFFFFFFFFF for fixed disk
+        assert!(footer[16..24].iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    fn test_vhd_footer_creator_app() {
+        let footer = create_vhd_footer(100 * 1024 * 1024);
+        assert_eq!(&footer[28..32], b"tcdr");
+    }
+
+    #[test]
+    fn test_vhd_footer_creator_host_os() {
+        let footer = create_vhd_footer(100 * 1024 * 1024);
+        // Wi2k = Windows
+        assert_eq!(&footer[36..40], &[0x57, 0x69, 0x32, 0x6B]);
+    }
+
+    #[test]
+    fn test_vhd_footer_sizes_match() {
+        let size = 50 * 1024 * 1024u64;
+        let footer = create_vhd_footer(size);
+        let original = u64::from_be_bytes(footer[40..48].try_into().unwrap());
+        let current = u64::from_be_bytes(footer[48..56].try_into().unwrap());
+        // For fixed disk, original and current size should be identical
+        assert_eq!(original, current);
+    }
+
+    #[test]
+    fn test_vhd_footer_checksum_varies_with_size() {
+        let footer1 = create_vhd_footer(100 * 1024 * 1024);
+        let footer2 = create_vhd_footer(200 * 1024 * 1024);
+        let checksum1 = u32::from_be_bytes([footer1[64], footer1[65], footer1[66], footer1[67]]);
+        let checksum2 = u32::from_be_bytes([footer2[64], footer2[65], footer2[66], footer2[67]]);
+        assert_ne!(checksum1, checksum2);
+    }
+
+    #[test]
+    fn test_compute_chs_tiny_disk() {
+        let (c, h, s) = compute_chs(512); // 1 sector
+        assert!(c >= 0); // may be 0 for very tiny
+        assert!(h >= 4);
+        assert!(s > 0);
+    }
+
+    #[test]
+    fn test_compute_chs_medium_disk() {
+        // Between small and large thresholds
+        let (c, h, s) = compute_chs(1024 * 1024 * 1024); // 1GB
+        assert!(c > 0);
+        assert!(h > 0);
+        assert!(s > 0);
+        // Total sectors should approximate reality
+        let total = (c as u64) * (h as u64) * (s as u64);
+        assert!(total > 0);
+    }
+
+    #[test]
+    fn test_write_be32() {
+        let mut buf = [0u8; 8];
+        write_be32(&mut buf, 2, 0x01020304);
+        assert_eq!(&buf[2..6], &[0x01, 0x02, 0x03, 0x04]);
+        // Surrounding bytes should be untouched
+        assert_eq!(buf[0], 0);
+        assert_eq!(buf[1], 0);
+        assert_eq!(buf[6], 0);
+        assert_eq!(buf[7], 0);
+    }
+
+    #[test]
+    fn test_write_be64() {
+        let mut buf = [0u8; 10];
+        write_be64(&mut buf, 1, 0x0102030405060708);
+        assert_eq!(&buf[1..9], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    }
+
+    #[test]
+    fn test_create_vhd_roundtrip() {
+        use std::cell::RefCell;
+
+        // Create a small stream of "filesystem" data
+        let data_size = 4096u64; // 4KB
+        let source_data: Vec<u8> = (0..data_size).map(|i| (i % 256) as u8).collect();
+        let mut source = Cursor::new(source_data.clone());
+
+        // Create VHD
+        let mut vhd_out = Cursor::new(Vec::new());
+        let progress_values = RefCell::new(Vec::new());
+        create_vhd(&mut source, &mut vhd_out, &|p| {
+            progress_values.borrow_mut().push(p);
+        }).unwrap();
+
+        // Verify VHD structure
+        let vhd_data = vhd_out.into_inner();
+        // Should have MBR + padding + data + VHD footer
+        assert!(vhd_data.len() > data_size as usize);
+
+        // Verify MBR boot signature
+        assert_eq!(vhd_data[510], 0x55);
+        assert_eq!(vhd_data[511], 0xAA);
+
+        // Verify VHD footer at end
+        let footer_start = vhd_data.len() - 512;
+        assert_eq!(&vhd_data[footer_start..footer_start + 8], b"conectix");
+
+        // Read partition data back
+        let mut vhd_reader = Cursor::new(vhd_data);
+        let partition_data = read_vhd_partition(&mut vhd_reader, data_size).unwrap();
+        assert_eq!(partition_data, source_data);
+
+        // Progress should have been reported
+        assert!(!progress_values.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_create_vhd_progress_reports() {
+        use std::cell::RefCell;
+
+        let data = vec![0u8; 1024];
+        let mut source = Cursor::new(data);
+        let mut vhd_out = Cursor::new(Vec::new());
+
+        let progress_values = RefCell::new(Vec::new());
+        create_vhd(&mut source, &mut vhd_out, &|p| {
+            progress_values.borrow_mut().push(p);
+        }).unwrap();
+
+        let values = progress_values.borrow();
+        // Progress should be between 0 and 1
+        for &p in values.iter() {
+            assert!(p >= 0.0 && p <= 1.0, "Progress {} out of range", p);
+        }
+        // Should report completion
+        assert!(!values.is_empty());
+    }
+
+    #[test]
+    fn test_read_vhd_partition() {
+        let data_size = 2048u64;
+        let source_data: Vec<u8> = (0..data_size).map(|i| (i % 251) as u8).collect();
+        let mut source = Cursor::new(source_data.clone());
+        let mut vhd_out = Cursor::new(Vec::new());
+
+        create_vhd(&mut source, &mut vhd_out, &|_| {}).unwrap();
+
+        let mut vhd_reader = Cursor::new(vhd_out.into_inner());
+        let result = read_vhd_partition(&mut vhd_reader, data_size).unwrap();
+        assert_eq!(result.len(), data_size as usize);
+        assert_eq!(result, source_data);
     }
 }

@@ -612,4 +612,141 @@ mod tests {
         let fs_type = detect_filesystem(&mut cursor).unwrap();
         assert_eq!(fs_type, FsType::Unknown);
     }
+
+    #[test]
+    fn test_detect_ntfs_case_insensitive() {
+        let mut data = vec![0u8; 512];
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        data[3..11].copy_from_slice(b"ntfs    ");
+
+        let mut cursor = io::Cursor::new(data);
+        let fs_type = detect_filesystem(&mut cursor).unwrap();
+        assert_eq!(fs_type, FsType::Ntfs);
+    }
+
+    #[test]
+    fn test_detect_fat_no_ntfs_oem() {
+        // Has boot signature but no NTFS OEM ID -> FAT
+        let mut data = vec![0u8; 512];
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        data[3..11].copy_from_slice(b"mkdosfs\0");
+
+        let mut cursor = io::Cursor::new(data);
+        let fs_type = detect_filesystem(&mut cursor).unwrap();
+        assert_eq!(fs_type, FsType::Fat);
+    }
+
+    #[test]
+    fn test_detect_resets_seek_position() {
+        let mut data = vec![0u8; 512];
+        data[510] = 0x55;
+        data[511] = 0xAA;
+
+        let mut cursor = io::Cursor::new(data);
+        detect_filesystem(&mut cursor).unwrap();
+        // After detection, stream should be back at position 0
+        assert_eq!(cursor.position(), 0);
+    }
+
+    #[test]
+    fn test_fstype_equality() {
+        assert_eq!(FsType::Fat, FsType::Fat);
+        assert_eq!(FsType::Ntfs, FsType::Ntfs);
+        assert_eq!(FsType::Unknown, FsType::Unknown);
+        assert_ne!(FsType::Fat, FsType::Ntfs);
+    }
+
+    #[test]
+    fn test_fstype_serializable() {
+        let json = serde_json::to_string(&FsType::Fat).unwrap();
+        assert_eq!(json, "\"Fat\"");
+        let json = serde_json::to_string(&FsType::Ntfs).unwrap();
+        assert_eq!(json, "\"Ntfs\"");
+        let json = serde_json::to_string(&FsType::Unknown).unwrap();
+        assert_eq!(json, "\"Unknown\"");
+    }
+
+    #[test]
+    fn test_file_entry_serializable() {
+        let entry = FileEntry {
+            name: "test.txt".to_string(),
+            path: "\\test.txt".to_string(),
+            size: 1024,
+            is_dir: false,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"name\":\"test.txt\""));
+        assert!(json.contains("\"size\":1024"));
+        assert!(json.contains("\"is_dir\":false"));
+    }
+
+    #[test]
+    fn test_file_entry_directory() {
+        let entry = FileEntry {
+            name: "docs".to_string(),
+            path: "\\docs".to_string(),
+            size: 0,
+            is_dir: true,
+        };
+        assert!(entry.is_dir);
+        assert_eq!(entry.size, 0);
+    }
+
+    #[test]
+    fn test_list_files_unknown_fs_errors() {
+        let data = vec![0u8; 512]; // No boot signature, unknown FS
+        let mut cursor = io::Cursor::new(data);
+        let result = list_files(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_all_unknown_fs_errors() {
+        let data = vec![0u8; 512];
+        let mut cursor = io::Cursor::new(data);
+        let dest = std::path::Path::new("/tmp/test_extract");
+        let result = extract_all(&mut cursor, dest, &|_| {});
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_file_unknown_fs_errors() {
+        let data = vec![0u8; 512];
+        let mut cursor = io::Cursor::new(data);
+        let dest = std::path::Path::new("/tmp/test_file");
+        let result = extract_file(&mut cursor, "\\test.txt", dest);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_file_bytes_unknown_fs_errors() {
+        let data = vec![0u8; 512];
+        let mut cursor = io::Cursor::new(data);
+        let result = read_file_bytes(&mut cursor, "\\test.txt", 1024);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_detect_too_short_data() {
+        // Data shorter than 512 bytes should fail
+        let data = vec![0u8; 100];
+        let mut cursor = io::Cursor::new(data);
+        let result = detect_filesystem(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ntfs_takes_precedence_over_fat() {
+        // If both NTFS OEM ID and boot signature are present, NTFS wins
+        let mut data = vec![0u8; 512];
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        data[3..11].copy_from_slice(b"NTFS    ");
+
+        let mut cursor = io::Cursor::new(data);
+        let fs_type = detect_filesystem(&mut cursor).unwrap();
+        assert_eq!(fs_type, FsType::Ntfs);
+    }
 }
