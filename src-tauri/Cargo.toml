@@ -1,5 +1,5 @@
 [package]
-name = "tc-drive"
+name = "safedrive"
 version = "0.1.0"
 description = "TrueCrypt Volume Reader"
 authors = ["you"]
