@@ -10,6 +10,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import { Shield, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { UpdateNotification } from "@/components/UpdateNotification";
 
 export type AppStep = "landing" | "file_selected" | "unlocking" | "unlocked" | "mounting" | "mounted";
 
@@ -399,6 +400,7 @@ function App() {
       )}
 
       <Toaster position="bottom-right" />
+      <UpdateNotification />
 
       {/* Lock screen overlay */}
       {isLocked && <LockScreen onUnlock={() => setIsLocked(false)} />}
